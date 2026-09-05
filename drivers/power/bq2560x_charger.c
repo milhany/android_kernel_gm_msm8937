@@ -69,6 +69,7 @@ enum {
 	JEITA		= BIT(1),
 	BATT_FC		= BIT(2),
 	BATT_PRES	= BIT(3),
+	THERMAL		= BIT(4),
 };
 
 enum wakeup_src {
@@ -1090,15 +1091,23 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 		chg_ma = bq->usb_psy_ma;
 	}
 
-	if (bq->therm_lvl_sel > 0
-			&& bq->therm_lvl_sel < (bq->thermal_levels - 1))
-		/*
-		 * consider thermal limit only when it is active and not at
-		 * the highest level
-		 */
-		therm_ma = bq->thermal_mitigation[bq->therm_lvl_sel];
-	else
-		therm_ma = chg_ma;
+	/*
+	 * Apply thermal mitigation monotonically.  Level 0 is unrestricted,
+	 * intermediate levels cap charge current, and the final level
+	 * disables charging completely.  The original GM8 driver skipped the
+	 * final 0 mA entry and unintentionally restored full current.
+	 */
+	if (bq->thermal_levels &&
+			bq->therm_lvl_sel >= (bq->thermal_levels - 1)) {
+		therm_ma = 0;
+		bq2560x_charging_disable(bq, THERMAL, true);
+	} else {
+		bq2560x_charging_disable(bq, THERMAL, false);
+		if (bq->therm_lvl_sel > 0)
+			therm_ma = bq->thermal_mitigation[bq->therm_lvl_sel];
+		else
+			therm_ma = chg_ma;
+	}
 
 	chg_ma = min(therm_ma, chg_ma);
 
