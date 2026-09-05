@@ -1036,6 +1036,8 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 	int chg_mv;
 	int icl;
 	int therm_ma;
+	int bq_vbus_type = BQ2560X_VBUS_NONE;
+	u8 chg_status = 0;
 
 	union power_supply_propval prop = {0,};
 
@@ -1050,14 +1052,29 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 		pr_err("couldn't read USB TYPE property, ret=%d\n", ret);
 		return ret;
 	}
-	pr_err("charge type = %d\n", prop.intval);
+	/*
+	 * Android 11 userspace can occasionally expose a conservative USB
+	 * power-supply type on this legacy PMIC stack.  The BQ2560x also has
+	 * hardware VBUS source detection, so use it as a fallback before
+	 * selecting the low-current USB profile.  This keeps the GM8 stock
+	 * 1.75/1.8 A adapter limits and does not bypass JEITA/thermal limits.
+	 */
+	ret = bq2560x_read_byte(bq, &chg_status, BQ2560X_REG_08);
+	if (!ret)
+		bq_vbus_type = (chg_status & REG08_VBUS_STAT_MASK) >>
+					REG08_VBUS_STAT_SHIFT;
+
+	pr_err("charge type = %d, bq vbus type = %d\n",
+			prop.intval, bq_vbus_type);
 	mutex_lock(&bq->profile_change_lock);
 	if (bq->jeita_active) {
 		chg_ma = bq->jeita_ma;
 		chg_mv = bq->jeita_mv;
 		bq->usb_psy_ma = bq->jeita_ma;
 	} else {
-		if (prop.intval == POWER_SUPPLY_TYPE_USB_DCP || prop.intval == POWER_SUPPLY_TYPE_USB_CDP) {
+		if (prop.intval == POWER_SUPPLY_TYPE_USB_DCP ||
+			prop.intval == POWER_SUPPLY_TYPE_USB_CDP ||
+			bq_vbus_type == BQ2560X_VBUS_ADAPTER) {
 			chg_ma = bq->platform_data->ta.ichg;
 			chg_mv = bq->platform_data->ta.vreg;
 			bq->usb_psy_ma =  bq->platform_data->ta.ilim;
@@ -1085,8 +1102,8 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 
 	chg_ma = min(therm_ma, chg_ma);
 
-	pr_err("charge volt = %d, charge curr = %d, input curr limit = %d\n",
-				chg_mv, chg_ma, icl);
+	pr_err("charge volt = %d, charge curr = %d, input curr limit = %d, thermal level = %u, jeita = %d\n",
+				chg_mv, chg_ma, icl, bq->therm_lvl_sel, bq->jeita_active);
 
        ret = bq2560x_get_batt_property(bq, POWER_SUPPLY_PROP_VOLTAGE_NOW, &prop);
 	
