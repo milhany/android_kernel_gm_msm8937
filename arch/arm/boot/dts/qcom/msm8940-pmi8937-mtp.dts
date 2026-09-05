@@ -219,9 +219,9 @@
             ti,bq2560x,usb-ichg = <500>;
 
             ti,bq2560x,ta-vlim = <4500>;
-            ti,bq2560x,ta-ilim = <1800>;
+            ti,bq2560x,ta-ilim = <2000>;
             ti,bq2560x,ta-vreg = <4400>;
-            ti,bq2560x,ta-ichg = <1750>;
+            ti,bq2560x,ta-ichg = <1980>;
 
             ti,bq2560x,precharge-current = <256>;
             ti,bq2560x,termination-current = <60>;
@@ -248,7 +248,7 @@
 
             ti,bq2560x,software-jeita-supported;
 
-            qcom,thermal-mitigation = <1750 1000 500 200 0>;
+            qcom,thermal-mitigation = <1980 1500 1000 500 0>;
         };
 };
 
