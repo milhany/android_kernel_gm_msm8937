@@ -33,13 +33,6 @@
 &pmi8950_charger {
 	qcom,battery-data = <&qrd_batterydata>;
 	qcom,float-voltage-mv = <4400>;
-	/*
-	 * The battery profile allows up to 2600 mA fast charge current.
-	 * Keep the deeper thermal protection levels intact, but raise the
-	 * first mitigation ceiling from the PMI8950 common default of
-	 * 1500 mA to 1800 mA for this GM8/MSM8937 SKU only.
-	 */
-	qcom,thermal-mitigation = <1800 700 600 0>;
 	qcom,chg-led-sw-controls;
 	qcom,chg-led-support;
 	status = "okay";
