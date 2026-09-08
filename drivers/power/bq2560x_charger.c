@@ -1057,8 +1057,8 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 	 * Android 11 userspace can occasionally expose a conservative USB
 	 * power-supply type on this legacy PMIC stack.  The BQ2560x also has
 	 * hardware VBUS source detection, so use it as a fallback before
-	 * selecting the low-current USB profile.  This keeps the GM8 stock
-	 * 1.75/1.8 A adapter limits and does not bypass JEITA/thermal limits.
+	 * selecting the low-current USB profile.  Adapter limits come from
+	 * the device tree; JEITA and thermal limits still apply below.
 	 */
 	ret = bq2560x_read_byte(bq, &chg_status, BQ2560X_REG_08);
 	if (!ret)
@@ -1114,11 +1114,11 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 	pr_err("charge volt = %d, charge curr = %d, input curr limit = %d, thermal level = %u, jeita = %d\n",
 				chg_mv, chg_ma, icl, bq->therm_lvl_sel, bq->jeita_active);
 
-       ret = bq2560x_get_batt_property(bq, POWER_SUPPLY_PROP_VOLTAGE_NOW, &prop);
-	
+	ret = bq2560x_get_batt_property(bq, POWER_SUPPLY_PROP_VOLTAGE_NOW, &prop);
+
 	if (ret < 0) {
-		pr_err("couldn't read USB voltage_now property, ret=%d\n", ret);
-		return ret;
+		pr_err("couldn't read battery voltage_now property, ret=%d\n", ret);
+		goto out_unlock;
 	}
 
 	if( prop.intval < (3400 * 1000))
@@ -1152,9 +1152,11 @@ static int bq2560x_update_charging_profile(struct bq2560x *bq)
 	else
 		bq2560x_charging_disable(bq, JEITA, false);
 
+	ret = 0;
+out_unlock:
 	mutex_unlock(&bq->profile_change_lock);
 
-	return 0;
+	return ret;
 }
 
 
@@ -2154,17 +2156,16 @@ static ssize_t bq2560x_battery_test_status_show(struct device *dev,
 static ssize_t bq2560x_battery_test_status_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	int retval;
 	unsigned int input;
 
 	if (sscanf(buf, "%u", &input) != 1)
-		retval = -EINVAL;
-	else
-	        BatteryTestStatus_enable = input;
+		return -EINVAL;
+
+	BatteryTestStatus_enable = input;
 
 	pr_err("BatteryTestStatus_enable = %d\n", BatteryTestStatus_enable);
 
-	return retval;
+	return count;
 }
 
 static ssize_t bq2560x_show_hiz(struct device *dev,
