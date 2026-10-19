@@ -266,3 +266,6 @@
 	qcom,hsusb-otg-phy-init-seq = <0x39 0x81 0x37 0x82 0xffffffff>;
  };
 #include "l2300-audio.dtsi" //merge from L2300 android O
+
+/* Temporary early-boot logging for the verified GM8 board variant. */
+#include "gm8-pstore-debug.dtsi"

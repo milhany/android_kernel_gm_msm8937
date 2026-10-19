@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * GM8's uploaded DTB and recovery memory map identify MSM8940-PMI8937 MTP.
+ * Reserve 1 MiB of ordinary RAM, outside its firmware/splash/CMA regions.
+ * This 3.18 ramoops driver uses module parameters, not a DT probe binding.
+ * Keep the reservation and parameters together, scoped to that board.
+ */
+/ {
+	reserved-memory {
+		gm8_ramoops: ramoops@9ff00000 {
+			reg = <0x0 0x9ff00000 0x0 0x100000>;
+			no-map;
+		};
+	};
+
+	chosen {
+		bootargs = "sched_enable_hmp=1 ramoops.mem_address=0x9ff00000 ramoops.mem_size=0x100000 ramoops.record_size=0x40000 ramoops.console_size=0x80000 ramoops.pmsg_size=0x40000 ramoops.ftrace_size=0 ramoops.ecc=1 androidboot.init_fatal_reboot_target=recovery";
+	};
+};

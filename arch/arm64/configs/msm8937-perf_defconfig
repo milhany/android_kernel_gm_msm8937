@@ -684,6 +684,12 @@ CONFIG_TOUCHSCREEN_FTS=y
 #Increase the dmesg log buffer
 CONFIG_LOG_BUF_SHIFT=21
 
+# Keep early boot output across warm resets for GM8 bring-up.
+CONFIG_PSTORE=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_PMSG=y
+CONFIG_PSTORE_RAM=y
+
 #reboot when trigger dump
 CONFIG_SSR_REBOOT=y
 
