@@ -115,6 +115,8 @@ struct input_value {
  * @num_vals: number of values queued in the current frame
  * @max_vals: maximum number of values queued in a frame
  * @vals: array of values queued in the current frame
+ * @no_dummy_release: preserve key state on resume for devices which report
+ *	their own release events; private quirk, never an input property.
  * @devres_managed: indicates that devices is managed with devres framework
  *	and needs not be explicitly unregistered or freed.
  */
@@ -186,6 +188,7 @@ struct input_dev {
 	unsigned int max_vals;
 	struct input_value *vals;
 
+	bool no_dummy_release;
 	bool devres_managed;
 };
 #define to_input_dev(d) container_of(d, struct input_dev, dev)
