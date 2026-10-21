@@ -1737,6 +1737,13 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 		/* block all signals */
 		sigprocmask(SIG_SETMASK, &new_sigset, &old_sigset);
 
+		/* GM8 QSEE diagnostic begin: metadata only, no command payload. */
+		pr_info("GM8 QSEE wait: tgid=%d tid=%d comm=%s app=%u listener=%u reentrant=%u\n",
+			current->tgid, current->pid, current->comm,
+			data->client.app_id, lstnr,
+			qseecom.qsee_reentrancy_support);
+		/* GM8 QSEE diagnostic end. */
+
 		do {
 			/*
 			 * When reentrancy is not supported, check global
@@ -1759,6 +1766,11 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 
 		/* restore signal mask */
 		sigprocmask(SIG_SETMASK, &old_sigset, NULL);
+		/* GM8 QSEE diagnostic begin: wait outcome, not key contents. */
+		pr_info("GM8 QSEE wait returned: tgid=%d tid=%d app=%u listener=%u abort=%d\n",
+			current->tgid, current->pid,
+			data->client.app_id, lstnr, !!data->abort);
+		/* GM8 QSEE diagnostic end. */
 		if (data->abort) {
 			pr_err("Abort clnt %d waiting on lstnr svc %d, ret %d",
 				data->client.app_id, lstnr, ret);
@@ -7649,12 +7661,32 @@ static int qseecom_release(struct inode *inode, struct file *file)
 			data->type, data->mode, data);
 		switch (data->type) {
 		case QSEECOM_LISTENER_SERVICE:
+			/* GM8 QSEE diagnostic begin: close before/after lock. */
+			pr_info("GM8 QSEE close listener: tgid=%d tid=%d comm=%s listener=%u\n",
+				current->tgid, current->pid,
+				current->comm, data->listener.id);
+			/* GM8 QSEE diagnostic end. */
 			mutex_lock(&app_access_lock);
+			/* GM8 QSEE diagnostic begin: lock acquisition reached. */
+			pr_info("GM8 QSEE close listener locked: tgid=%d tid=%d listener=%u\n",
+				current->tgid, current->pid,
+				data->listener.id);
+			/* GM8 QSEE diagnostic end. */
 			ret = qseecom_unregister_listener(data);
 			mutex_unlock(&app_access_lock);
 			break;
 		case QSEECOM_CLIENT_APP:
+			/* GM8 QSEE diagnostic begin: close before/after lock. */
+			pr_info("GM8 QSEE close app: tgid=%d tid=%d comm=%s app=%u\n",
+				current->tgid, current->pid,
+				current->comm, data->client.app_id);
+			/* GM8 QSEE diagnostic end. */
 			mutex_lock(&app_access_lock);
+			/* GM8 QSEE diagnostic begin: lock acquisition reached. */
+			pr_info("GM8 QSEE close app locked: tgid=%d tid=%d app=%u\n",
+				current->tgid, current->pid,
+				data->client.app_id);
+			/* GM8 QSEE diagnostic end. */
 			ret = qseecom_unload_app(data, true);
 			mutex_unlock(&app_access_lock);
 			break;
@@ -8993,3 +9025,4 @@ MODULE_DESCRIPTION("Qualcomm Secure Execution Environment Communicator");
 
 module_init(qseecom_init);
 module_exit(qseecom_exit);
+
