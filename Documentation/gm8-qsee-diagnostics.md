@@ -10,7 +10,7 @@ is unchanged.
 The Play Store ANR main thread waits in
 IKeystoreSecurityLevel.generateKey / KeyGenerator.generateKey. Later,
 system_server waits in IKeystoreAuthorization.onLockScreenEvent. Watchdog kills
-system_server at 18:56:41, 19:01:09 and 19:03:08. Bluetooth ANRs wait in
+system_server at 18:56:41, 19:01:09, 19:03:08 and 19:04:59. Bluetooth ANRs wait in
 IKeystoreService.getKeyEntry; subsequent system-server starts also wait on
 legacy-keystore VPN profile reads. This is a shared keystore failure, rather
 than proof of a GPU crash.
