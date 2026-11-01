@@ -1667,7 +1667,7 @@ void input_reset_device(struct input_dev *dev)
 	 * Keys that have been pressed at suspend time are unlikely
 	 * to be still pressed when we resume.
 	 */
-	if (!test_bit(INPUT_PROP_NO_DUMMY_RELEASE, dev->propbit)) {
+	if (!dev->no_dummy_release) {
 		input_dev_toggle(dev, true);
 		input_dev_release_keys(dev);
 	}
