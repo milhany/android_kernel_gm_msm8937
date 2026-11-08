@@ -1384,6 +1384,7 @@ static int fts_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 
     spin_lock_init(&ts_data->irq_lock);
     mutex_init(&ts_data->report_mutex);
+    mutex_init(&ts_data->gesture_mutex);
 
     ret = fts_input_init(ts_data);
     if (ret) {
@@ -1595,6 +1596,9 @@ static int fts_ts_remove(struct i2c_client *client)
     unregister_early_suspend(&ts_data->early_suspend);
 #endif
 
+#if FTS_GESTURE_EN
+    fts_gesture_exit(client);
+#endif
     free_irq(client->irq, ts_data);
     input_unregister_device(ts_data->input_dev);
 

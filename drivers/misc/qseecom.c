@@ -181,6 +181,8 @@ struct qseecom_registered_listener_list {
 	wait_queue_head_t          rcv_req_wq;
 	int                        rcv_req_flag;
 	int                        send_resp_flag;
+	/* Final close can abort a legacy wait before app_access_lock. */
+	atomic_t                   legacy_close;
 	bool                       listener_in_use;
 	/* wq for thread blocked on this listener*/
 	wait_queue_head_t          listener_block_app_wq;
@@ -1209,12 +1211,46 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
 	init_waitqueue_head(&new_entry->rcv_req_wq);
 	init_waitqueue_head(&new_entry->listener_block_app_wq);
 	new_entry->send_resp_flag = 0;
+	atomic_set(&new_entry->legacy_close, 0);
 	new_entry->listener_in_use = false;
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_add_tail(&new_entry->list, &qseecom.registered_listener_list_head);
 	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
 
 	return ret;
+}
+
+/*
+ * The legacy command path holds app_access_lock while awaiting its listener.
+ * Final fput of that listener cannot take the same lock until the wait ends.
+ * Publish only the matching listener's close under the list lock, then wake
+ * the command so it can send a FAILURE response through the existing TZ path.
+ * Do not remove the entry or its ION buffer here: unregister still owns them
+ * under app_access_lock, after the legacy command has stopped using them.
+ * Reentrant QSEE has a different lifetime model and is deliberately unchanged.
+ */
+static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data)
+{
+	struct qseecom_registered_listener_list *ptr_svc;
+	unsigned long flags;
+	bool found = false;
+
+	if (qseecom.qsee_reentrancy_support)
+		return;
+
+	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
+	list_for_each_entry(ptr_svc, &qseecom.registered_listener_list_head,
+			list) {
+		if (ptr_svc->svc.listener_id == data->listener.id) {
+			atomic_set(&ptr_svc->legacy_close, 1);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
+
+	if (found)
+		wake_up_all(&qseecom.send_resp_wq);
 }
 
 static int qseecom_unregister_listener(struct qseecom_dev_handle *data)
@@ -1598,11 +1634,12 @@ static int qseecom_set_client_mem_param(struct qseecom_dev_handle *data,
 	return 0;
 }
 
-static int __qseecom_listener_has_sent_rsp(struct qseecom_dev_handle *data)
+static int __qseecom_listener_has_sent_rsp(struct qseecom_dev_handle *data,
+			struct qseecom_registered_listener_list *ptr_svc)
 {
 	int ret;
 	ret = (qseecom.send_resp_flag != 0);
-	return ret || data->abort;
+	return ret || data->abort || atomic_read(&ptr_svc->legacy_close);
 }
 
 static int __qseecom_reentrancy_listener_has_sent_rsp(
@@ -1745,7 +1782,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 			 */
 			if (!qseecom.qsee_reentrancy_support &&
 				!wait_event_freezable(qseecom.send_resp_wq,
-				__qseecom_listener_has_sent_rsp(data))) {
+				__qseecom_listener_has_sent_rsp(data, ptr_svc))) {
 					break;
 			}
 
@@ -1759,7 +1796,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 
 		/* restore signal mask */
 		sigprocmask(SIG_SETMASK, &old_sigset, NULL);
-		if (data->abort) {
+		if (data->abort || atomic_read(&ptr_svc->legacy_close)) {
 			pr_err("Abort clnt %d waiting on lstnr svc %d, ret %d",
 				data->client.app_id, lstnr, ret);
 			rc = -ENODEV;
@@ -7649,6 +7686,7 @@ static int qseecom_release(struct inode *inode, struct file *file)
 			data->type, data->mode, data);
 		switch (data->type) {
 		case QSEECOM_LISTENER_SERVICE:
+			__qseecom_abort_legacy_listener(data);
 			mutex_lock(&app_access_lock);
 			ret = qseecom_unregister_listener(data);
 			mutex_unlock(&app_access_lock);
