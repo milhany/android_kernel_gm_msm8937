@@ -142,6 +142,9 @@ struct fts_ts_data {
     struct regulator *vcc_i2c;
     spinlock_t irq_lock;
     struct mutex report_mutex;
+    /* Protect the wake reference owned by the gesture suspend/resume path. */
+    struct mutex gesture_mutex;
+    bool gesture_irq_wake;
     int irq;
     bool suspended;
     bool fw_loading;

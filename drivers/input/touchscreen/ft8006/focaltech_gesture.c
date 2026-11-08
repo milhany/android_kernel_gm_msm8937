@@ -428,93 +428,93 @@ void fts_gesture_recovery(struct i2c_client *client)
 * Output:
 * Return: return 0 if succuss, otherwise return error code
 *****************************************************************************/
-int fts_gesture_suspend(struct i2c_client *client)
+/* Check every transfer: an unread register must never count as success. */
+static int fts_gesture_set_state(struct i2c_client *client, u8 enable)
 {
-    int ret;
+    static const u8 mask_regs[] = { 0xd1, 0xd2, 0xd5, 0xd6, 0xd7, 0xd8 };
+    int ret = -EIO;
     int i;
+    int j;
     u8 state;
 
-    FTS_INFO("gesture suspend...");
-#if 0
-    /* gesture not enable, return immediately */
-    if (fts_gesture_data.mode == DISABLE) {
-        FTS_INFO("gesture is disabled");
-        return -EINVAL;
-    }
-#endif
     for (i = 0; i < 5; i++) {
-        fts_i2c_write_reg(client, 0xd1, 0xff);
-        fts_i2c_write_reg(client, 0xd2, 0xff);
-        fts_i2c_write_reg(client, 0xd5, 0xff);
-        fts_i2c_write_reg(client, 0xd6, 0xff);
-        fts_i2c_write_reg(client, 0xd7, 0xff);
-        fts_i2c_write_reg(client, 0xd8, 0xff);
-        fts_i2c_write_reg(client, FTS_REG_GESTURE_EN, ENABLE);
+        if (enable == ENABLE) {
+            for (j = 0; j < ARRAY_SIZE(mask_regs); j++) {
+                ret = fts_i2c_write_reg(client, mask_regs[j], 0xff);
+                if (ret < 0)
+                    break;
+            }
+            if (ret < 0)
+                goto retry;
+        }
+        ret = fts_i2c_write_reg(client, FTS_REG_GESTURE_EN, enable);
+        if (ret < 0)
+            goto retry;
         msleep(1);
-        fts_i2c_read_reg(client, FTS_REG_GESTURE_EN, &state);
-        if (state == ENABLE)
-            break;
+        ret = fts_i2c_read_reg(client, FTS_REG_GESTURE_EN, &state);
+        if (ret >= 0 && state == enable)
+            return 0;
+        if (ret >= 0)
+            ret = -EIO;
+retry:
+        if (i < 4)
+            msleep(1);
     }
-
-    if (state == DISABLE) {
-        FTS_ERROR("[GESTURE]Enter into gesture(suspend) failed!\n");
-        fts_gesture_data.mode = DISABLE;
-        return -EIO;
-    }
-
-    ret = enable_irq_wake(client->irq);
-    if (ret) {
-        FTS_INFO("enable_irq_wake(irq:%d) failed", client->irq);
-    }
-
-    FTS_INFO("[GESTURE]Enter into gesture(suspend) successfully!");
-    FTS_FUNC_EXIT();
-    return 0;
+    return ret;
 }
 
-/*****************************************************************************
-*   Name: fts_gesture_resume
-*  Brief:
-*  Input:
-* Output:
-* Return: return 0 if succuss, otherwise return error code
-*****************************************************************************/
+/* gesture_mutex is held; retain ownership if the IRQ controller rejects it. */
+static int fts_gesture_release_wake(struct i2c_client *client)
+{
+    struct fts_ts_data *ts_data = i2c_get_clientdata(client);
+    int ret;
+
+    if (!ts_data->gesture_irq_wake)
+        return 0;
+    ret = disable_irq_wake(client->irq);
+    if (!ret)
+        ts_data->gesture_irq_wake = false;
+    else
+        FTS_ERROR("disable_irq_wake(irq:%d) failed: %d", client->irq, ret);
+    return ret;
+}
+
+int fts_gesture_suspend(struct i2c_client *client)
+{
+    struct fts_ts_data *ts_data = i2c_get_clientdata(client);
+    int ret;
+
+    mutex_lock(&ts_data->gesture_mutex);
+    ret = fts_gesture_set_state(client, ENABLE);
+    if (ret)
+        goto out;
+    if (!ts_data->gesture_irq_wake) {
+        ret = enable_irq_wake(client->irq);
+        if (ret) {
+            FTS_ERROR("enable_irq_wake(irq:%d) failed: %d", client->irq, ret);
+            /* The caller will use its normal non-gesture suspend path. */
+            fts_gesture_set_state(client, DISABLE);
+            goto out;
+        }
+        ts_data->gesture_irq_wake = true;
+    }
+out:
+    mutex_unlock(&ts_data->gesture_mutex);
+    return ret;
+}
+
 int fts_gesture_resume(struct i2c_client *client)
 {
+    struct fts_ts_data *ts_data = i2c_get_clientdata(client);
     int ret;
-    int i;
-    u8 state;
+    int wake_ret;
 
-    FTS_INFO("gesture resume...");
-#if 0
-    /* gesture not enable, return immediately */
-    if (fts_gesture_data.mode == DISABLE) {
-        FTS_INFO("gesture is disabled");
-        return -EINVAL;
-    }
-#endif
-    for (i = 0; i < 5; i++) {
-        fts_i2c_write_reg(client, FTS_REG_GESTURE_EN, DISABLE);
-        msleep(1);
-        fts_i2c_read_reg(client, FTS_REG_GESTURE_EN, &state);
-        if (state == DISABLE)
-            break;
-    }
-
-    if (state == ENABLE) {
-        FTS_ERROR("[GESTURE]Clear gesture(resume) failed!\n");
-        fts_gesture_data.mode = ENABLE;
-        return -EIO;
-    }
-
-    ret = disable_irq_wake(client->irq);
-    if (ret) {
-        FTS_INFO("disable_irq_wake(irq:%d) failed", client->irq);
-    }
-
-    FTS_INFO("[GESTURE]resume from gesture successfully!");
-    FTS_FUNC_EXIT();
-    return 0;
+    mutex_lock(&ts_data->gesture_mutex);
+    ret = fts_gesture_set_state(client, DISABLE);
+    /* Release our reference even when the controller is not responding. */
+    wake_ret = fts_gesture_release_wake(client);
+    mutex_unlock(&ts_data->gesture_mutex);
+    return ret ? ret : wake_ret;
 }
 
 /*****************************************************************************
@@ -577,9 +577,15 @@ int fts_gesture_init(struct fts_ts_data *ts_data)
 ***********************************************************************/
 int fts_gesture_exit(struct i2c_client *client)
 {
+    struct fts_ts_data *ts_data = i2c_get_clientdata(client);
+    int ret;
+
     FTS_FUNC_ENTER();
     sysfs_remove_group(&client->dev.kobj, &fts_gesture_group);
+    mutex_lock(&ts_data->gesture_mutex);
+    ret = fts_gesture_release_wake(client);
+    mutex_unlock(&ts_data->gesture_mutex);
     FTS_FUNC_EXIT();
-    return 0;
+    return ret;
 }
 #endif
