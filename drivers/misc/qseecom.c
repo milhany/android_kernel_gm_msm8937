@@ -23,6 +23,7 @@
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
 #include <linux/sched.h>
+#include <linux/pid.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/io.h>
@@ -183,6 +184,8 @@ struct qseecom_registered_listener_list {
 	int                        send_resp_flag;
 	/* Final close can abort a legacy wait before app_access_lock. */
 	atomic_t                   legacy_close;
+	/* Retain identity across exit/PID reuse; no userspace ABI change. */
+	struct pid                 *owner_tgid;
 	bool                       listener_in_use;
 	/* wq for thread blocked on this listener*/
 	wait_queue_head_t          listener_block_app_wq;
@@ -1212,6 +1215,7 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
 	init_waitqueue_head(&new_entry->listener_block_app_wq);
 	new_entry->send_resp_flag = 0;
 	atomic_set(&new_entry->legacy_close, 0);
+	new_entry->owner_tgid = get_pid(task_tgid(current));
 	new_entry->listener_in_use = false;
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_add_tail(&new_entry->list, &qseecom.registered_listener_list_head);
@@ -1223,8 +1227,12 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
 /*
  * The legacy command path holds app_access_lock while awaiting its listener.
  * Final fput of that listener cannot take the same lock until the wait ends.
- * Publish only the matching listener's close under the list lock, then wake
- * the command so it can send a FAILURE response through the existing TZ path.
+ * A dying service group can own several listener FDs. Final fput may close an
+ * unrelated listener first and block before reaching the one a client needs.
+ * On whole-group exit, mark every listener registered by that group; ordinary
+ * close still marks only its matching listener. Keep a referenced struct pid
+ * identity so a reused numeric TGID cannot match a different service group.
+ * Wake the command to send FAILURE through the existing TZ response path.
  * Do not remove the entry or its ION buffer here: unregister still owns them
  * under app_access_lock, after the legacy command has stopped using them.
  * Reentrant QSEE has a different lifetime model and is deliberately unchanged.
@@ -1232,23 +1240,34 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
 static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data)
 {
 	struct qseecom_registered_listener_list *ptr_svc;
+	struct pid *exiting_owner = NULL;
 	unsigned long flags;
+	unsigned int group_close = 0;
 	bool found = false;
 
 	if (qseecom.qsee_reentrancy_support)
 		return;
+	if ((current->flags & PF_EXITING) &&
+			(current->signal->flags & SIGNAL_GROUP_EXIT))
+		exiting_owner = task_tgid(current);
 
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_for_each_entry(ptr_svc, &qseecom.registered_listener_list_head,
 			list) {
-		if (ptr_svc->svc.listener_id == data->listener.id) {
+		if (ptr_svc->svc.listener_id == data->listener.id ||
+				(exiting_owner && ptr_svc->owner_tgid == exiting_owner)) {
+			if (exiting_owner && ptr_svc->owner_tgid == exiting_owner &&
+					!atomic_read(&ptr_svc->legacy_close))
+				group_close++;
 			atomic_set(&ptr_svc->legacy_close, 1);
 			found = true;
-			break;
 		}
 	}
 	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
 
+	if (group_close)
+		pr_warn("Abort %u listeners for exiting service tgid=%d\n",
+				group_close, task_tgid_nr(current));
 	if (found)
 		wake_up_all(&qseecom.send_resp_wq);
 }
@@ -1262,6 +1281,7 @@ static int qseecom_unregister_listener(struct qseecom_dev_handle *data)
 	struct qseecom_registered_listener_list *ptr_svc = NULL;
 	struct qseecom_command_scm_resp resp;
 	struct ion_handle *ihandle = NULL;		/* Retrieve phy addr */
+	struct pid *owner_tgid = NULL;
 
 	req.qsee_cmd_id = QSEOS_DEREGISTER_LISTENER;
 	req.listener_id = data->listener.id;
@@ -1312,12 +1332,14 @@ static int qseecom_unregister_listener(struct qseecom_dev_handle *data)
 				ihandle = ptr_svc->ihandle;
 				}
 			list_del(&ptr_svc->list);
+			owner_tgid = ptr_svc->owner_tgid;
 			kzfree(ptr_svc);
 			break;
 		}
 	}
 	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
 
+	put_pid(owner_tgid);
 	/* Unmap the memory */
 	if (unmap_mem) {
 		if (!IS_ERR_OR_NULL(ihandle)) {
