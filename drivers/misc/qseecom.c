@@ -1083,22 +1083,24 @@ static struct qseecom_registered_listener_list *__qseecom_find_svc(
 						int32_t listener_id)
 {
 	struct qseecom_registered_listener_list *entry = NULL;
+	struct qseecom_registered_listener_list *found = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_for_each_entry(entry, &qseecom.registered_listener_list_head, list)
 	{
-		if (entry->svc.listener_id == listener_id)
+		if (entry->svc.listener_id == listener_id) {
+			found = entry;
 			break;
+		}
 	}
 	spin_unlock_irqrestore(&qseecom.registered_listener_list_lock, flags);
 
-	if ((entry != NULL) && (entry->svc.listener_id != listener_id)) {
+	if (!found) {
 		pr_err("Service id: %u is not found\n", listener_id);
-		return NULL;
 	}
 
-	return entry;
+	return found;
 }
 
 static int __qseecom_set_sb_memory(struct qseecom_registered_listener_list *svc,
@@ -1118,6 +1120,7 @@ static int __qseecom_set_sb_memory(struct qseecom_registered_listener_list *svc,
 					listener->ifd_data_fd);
 	if (IS_ERR_OR_NULL(svc->ihandle)) {
 		pr_err("Ion client could not retrieve the handle\n");
+		svc->ihandle = NULL;
 		return -ENOMEM;
 	}
 
@@ -1126,13 +1129,15 @@ static int __qseecom_set_sb_memory(struct qseecom_registered_listener_list *svc,
 	if (ret) {
 		pr_err("Cannot get phys_addr for the Ion Client, ret = %d\n",
 			ret);
-		return ret;
+		goto free_handle;
 	}
 	/* Populate the structure for sending scm call to load image */
 	svc->sb_virt = (char *) ion_map_kernel(qseecom.ion_clnt, svc->ihandle);
 	if (IS_ERR_OR_NULL(svc->sb_virt)) {
 		pr_err("ION memory mapping for listener shared buffer failed\n");
-		return -ENOMEM;
+		svc->sb_virt = NULL;
+		ret = -ENOMEM;
+		goto free_handle;
 	}
 	svc->sb_phys = (phys_addr_t)pa;
 
@@ -1158,15 +1163,25 @@ static int __qseecom_set_sb_memory(struct qseecom_registered_listener_list *svc,
 					 &resp, sizeof(resp));
 	if (ret) {
 		pr_err("qseecom_scm_call failed with err: %d\n", ret);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unmap_buffer;
 	}
 
 	if (resp.result != QSEOS_RESULT_SUCCESS) {
 		pr_err("Error SB registration req: resp.result = %d\n",
 			resp.result);
-		return -EPERM;
+		ret = -EPERM;
+		goto unmap_buffer;
 	}
 	return 0;
+
+unmap_buffer:
+	ion_unmap_kernel(qseecom.ion_clnt, svc->ihandle);
+	svc->sb_virt = NULL;
+free_handle:
+	ion_free(qseecom.ion_clnt, svc->ihandle);
+	svc->ihandle = NULL;
+	return ret;
 }
 
 static int qseecom_register_listener(struct qseecom_dev_handle *data,
@@ -1254,7 +1269,8 @@ static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data)
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_for_each_entry(ptr_svc, &qseecom.registered_listener_list_head,
 			list) {
-		if (ptr_svc->svc.listener_id == data->listener.id ||
+		if ((data->type == QSEECOM_LISTENER_SERVICE &&
+				ptr_svc->svc.listener_id == data->listener.id) ||
 				(exiting_owner && ptr_svc->owner_tgid == exiting_owner)) {
 			if (exiting_owner && ptr_svc->owner_tgid == exiting_owner &&
 					!atomic_read(&ptr_svc->legacy_close))
@@ -1680,11 +1696,28 @@ static int __qseecom_qseos_fail_return_resp_tz(struct qseecom_dev_handle *data,
 			struct qseecom_registered_listener_list *ptr_svc,
 							uint32_t lstnr) {
 	int ret = 0;
+	struct qseecom_client_listener_data_64bit_irsp send_data_rsp_64bit = {0};
+	void *cmd_buf;
+	size_t cmd_len;
 
+	/* This is a failure reply, with no uninitialized scatter/gather metadata. */
+	memset(send_data_rsp, 0, sizeof(*send_data_rsp));
 	send_data_rsp->status = QSEOS_RESULT_FAILURE;
 	qseecom.send_resp_flag = 0;
-	send_data_rsp->qsee_cmd_id = QSEOS_LISTENER_DATA_RSP_COMMAND;
+	send_data_rsp->qsee_cmd_id = qseecom.whitelist_support ?
+		QSEOS_LISTENER_DATA_RSP_COMMAND_WHITELIST :
+		QSEOS_LISTENER_DATA_RSP_COMMAND;
 	send_data_rsp->listener_id = lstnr;
+	if (qseecom.qsee_version < QSEE_VERSION_40) {
+		cmd_buf = send_data_rsp;
+		cmd_len = sizeof(*send_data_rsp);
+	} else {
+		send_data_rsp_64bit.qsee_cmd_id = send_data_rsp->qsee_cmd_id;
+		send_data_rsp_64bit.listener_id = lstnr;
+		send_data_rsp_64bit.status = QSEOS_RESULT_FAILURE;
+		cmd_buf = &send_data_rsp_64bit;
+		cmd_len = sizeof(send_data_rsp_64bit);
+	}
 	if (ptr_svc)
 		pr_warn("listener_id:%x, lstnr: %x\n",
 					ptr_svc->svc.listener_id, lstnr);
@@ -1698,17 +1731,17 @@ static int __qseecom_qseos_fail_return_resp_tz(struct qseecom_dev_handle *data,
 		}
 	}
 
-	if (lstnr == RPMB_SERVICE) {
+	if ((lstnr == RPMB_SERVICE) || (lstnr == SSD_SERVICE)) {
 		ret = __qseecom_enable_clk(CLK_QSEE);
 		if (ret)
 			return ret;
 	}
-	ret = qseecom_scm_call(SCM_SVC_TZSCHEDULER, 1, send_data_rsp,
-				sizeof(send_data_rsp), resp, sizeof(*resp));
+	ret = qseecom_scm_call(SCM_SVC_TZSCHEDULER, 1, cmd_buf,
+				cmd_len, resp, sizeof(*resp));
 	if (ret) {
 		pr_err("scm_call() failed with err: %d (app_id = %d)\n",
 						ret, data->client.app_id);
-		if (lstnr == RPMB_SERVICE)
+		if ((lstnr == RPMB_SERVICE) || (lstnr == SSD_SERVICE))
 			__qseecom_disable_clk(CLK_QSEE);
 		return ret;
 	}
@@ -1718,7 +1751,7 @@ static int __qseecom_qseos_fail_return_resp_tz(struct qseecom_dev_handle *data,
 				resp->result, data->client.app_id, lstnr);
 		ret = -EINVAL;
 	}
-	if (lstnr == RPMB_SERVICE)
+	if ((lstnr == RPMB_SERVICE) || (lstnr == SSD_SERVICE))
 		__qseecom_disable_clk(CLK_QSEE);
 	return ret;
 }
@@ -1743,6 +1776,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 	struct qseecom_client_listener_data_irsp send_data_rsp;
 	struct qseecom_client_listener_data_64bit_irsp send_data_rsp_64bit;
 	struct qseecom_registered_listener_list *ptr_svc = NULL;
+	bool listener_found;
 	sigset_t new_sigset;
 	sigset_t old_sigset;
 	uint32_t status;
@@ -1752,6 +1786,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 
 	while (resp->result == QSEOS_RESULT_INCOMPLETE) {
 		lstnr = resp->data;
+		listener_found = false;
 		/*
 		 * Wake up blocking lsitener service with the lstnr id
 		 */
@@ -1760,12 +1795,15 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 		list_for_each_entry(ptr_svc,
 				&qseecom.registered_listener_list_head, list) {
 			if (ptr_svc->svc.listener_id == lstnr) {
+				listener_found = true;
 				ptr_svc->listener_in_use = true;
 				ptr_svc->rcv_req_flag = 1;
 				wake_up_interruptible(&ptr_svc->rcv_req_wq);
 				break;
 			}
 		}
+		if (!listener_found)
+			ptr_svc = NULL;
 		spin_unlock_irqrestore(&qseecom.registered_listener_list_lock,
 				flags);
 
@@ -7706,9 +7744,10 @@ static int qseecom_release(struct inode *inode, struct file *file)
 	if (data->released == false) {
 		pr_debug("data: released=false, type=%d, mode=%d, data=0x%pK\n",
 			data->type, data->mode, data);
+		/* Whole-group exit may close a client FD before any listener FD. */
+		__qseecom_abort_legacy_listener(data);
 		switch (data->type) {
 		case QSEECOM_LISTENER_SERVICE:
-			__qseecom_abort_legacy_listener(data);
 			mutex_lock(&app_access_lock);
 			ret = qseecom_unregister_listener(data);
 			mutex_unlock(&app_access_lock);
