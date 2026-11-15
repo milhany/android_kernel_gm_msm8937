@@ -1247,12 +1247,18 @@ static int qseecom_register_listener(struct qseecom_dev_handle *data,
  * On whole-group exit, mark every listener registered by that group; ordinary
  * close still marks only its matching listener. Keep a referenced struct pid
  * identity so a reused numeric TGID cannot match a different service group.
+ * Exit-time flush runs before fput can move release to a kernel worker, where
+ * current no longer identifies the exiting service. Abort that owner's group
+ * during flush; only final release may abort a listener by its handle ID.
+ * This distinction keeps a child's close of an inherited FD from aborting a
+ * listener still owned by the parent. Ordinary flush must not abort dup FDs.
  * Wake the command to send FAILURE through the existing TZ response path.
  * Do not remove the entry or its ION buffer here: unregister still owns them
  * under app_access_lock, after the legacy command has stopped using them.
  * Reentrant QSEE has a different lifetime model and is deliberately unchanged.
  */
-static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data)
+static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data,
+					  bool final_close)
 {
 	struct qseecom_registered_listener_list *ptr_svc;
 	struct pid *exiting_owner = NULL;
@@ -1269,7 +1275,7 @@ static void __qseecom_abort_legacy_listener(struct qseecom_dev_handle *data)
 	spin_lock_irqsave(&qseecom.registered_listener_list_lock, flags);
 	list_for_each_entry(ptr_svc, &qseecom.registered_listener_list_head,
 			list) {
-		if ((data->type == QSEECOM_LISTENER_SERVICE &&
+		if ((final_close && data->type == QSEECOM_LISTENER_SERVICE &&
 				ptr_svc->svc.listener_id == data->listener.id) ||
 				(exiting_owner && ptr_svc->owner_tgid == exiting_owner)) {
 			if (exiting_owner && ptr_svc->owner_tgid == exiting_owner &&
@@ -7736,6 +7742,18 @@ static int qseecom_open(struct inode *inode, struct file *file)
 	return ret;
 }
 
+static int qseecom_flush(struct file *file, fl_owner_t id)
+{
+	struct qseecom_dev_handle *data = file->private_data;
+
+	/* flush runs for every FD close, not just the final file reference. */
+	if (data && !data->released && (current->flags & PF_EXITING) &&
+			(current->signal->flags & SIGNAL_GROUP_EXIT))
+		__qseecom_abort_legacy_listener(data, false);
+
+	return 0;
+}
+
 static int qseecom_release(struct inode *inode, struct file *file)
 {
 	struct qseecom_dev_handle *data = file->private_data;
@@ -7745,7 +7763,7 @@ static int qseecom_release(struct inode *inode, struct file *file)
 		pr_debug("data: released=false, type=%d, mode=%d, data=0x%pK\n",
 			data->type, data->mode, data);
 		/* Whole-group exit may close a client FD before any listener FD. */
-		__qseecom_abort_legacy_listener(data);
+		__qseecom_abort_legacy_listener(data, true);
 		switch (data->type) {
 		case QSEECOM_LISTENER_SERVICE:
 			mutex_lock(&app_access_lock);
@@ -7801,6 +7819,7 @@ static const struct file_operations qseecom_fops = {
 		.compat_ioctl = compat_qseecom_ioctl,
 #endif
 		.open = qseecom_open,
+		.flush = qseecom_flush,
 		.release = qseecom_release
 };
 
